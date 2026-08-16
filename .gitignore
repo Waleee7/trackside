@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Rendered scenes are large and fully reproducible from demo.py.
+out/scenes/
+out/demo_run.txt

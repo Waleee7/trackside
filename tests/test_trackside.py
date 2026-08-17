@@ -163,13 +163,15 @@ def test_flight_recovers_release_state_and_distance(throw_scene):
     p = meta["payload"]
     cal = PlaneCalibration.from_circle(p["ring_width_px"], "shot", sigma_pixel=2.0)
     res = analyse_flight(frames, cal, meta["fps"], p["ground_y_px"],
-                         use_gravity_scale=True)
+                         scale_mode="fuse", exposure_s=p["exposure_s"])
 
     assert res.release_speed.value == pytest.approx(p["v0_ms"], rel=0.02)
     assert res.release_angle.value == pytest.approx(p["angle_deg"], rel=0.02)
-    assert res.predicted_distance_with_drag.value == pytest.approx(
+    assert res.predicted_distance.value == pytest.approx(
         p["landing_distance_m"], rel=0.02
     )
+    # Fitting the true model should leave sub-pixel residuals.
+    assert res.residual_px < 1.0
 
 
 def test_ballistic_gating_rejects_the_moving_thrower(throw_scene):
@@ -190,8 +192,9 @@ def test_gravity_is_recovered_as_an_independent_audit(throw_scene):
     p = meta["payload"]
     cal = PlaneCalibration.from_circle(p["ring_width_px"], "shot", sigma_pixel=2.0)
     res = analyse_flight(frames, cal, meta["fps"], p["ground_y_px"],
-                         use_gravity_scale=False)
+                         scale_mode="ruler", exposure_s=p["exposure_s"])
     assert res.recovered_g.value == pytest.approx(physics.G, rel=0.03)
+    assert res.scale.consistent
 
 
 def test_a_bad_ruler_shows_up_as_bad_gravity(throw_scene):
@@ -202,6 +205,8 @@ def test_a_bad_ruler_shows_up_as_bad_gravity(throw_scene):
     # A 10% calibration error, as if the wrong circle diameter were assumed.
     bad = PlaneCalibration.from_circle(p["ring_width_px"] * 1.10, "shot")
     res = analyse_flight(frames, bad, meta["fps"], p["ground_y_px"],
-                         use_gravity_scale=False)
+                         scale_mode="ruler", exposure_s=p["exposure_s"])
     assert abs(res.recovered_g.value - physics.G) / physics.G > 0.05
     assert not res.scale_check_passes
+    # The fusion layer must call it out, not quietly average it away.
+    assert res.scale.birge > 1.5

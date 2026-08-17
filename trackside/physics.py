@@ -129,6 +129,73 @@ def integrate(
     return Trajectory(np.array(ts), np.array(xs), np.array(ys))
 
 
+def integrate_many(
+    v0: np.ndarray,
+    theta: np.ndarray,
+    h0: np.ndarray,
+    implement: str = "shot_mens",
+    cd: float = CD_SPHERE,
+    rho: float = RHO_AIR,
+    dt: float = 2e-3,
+    g: float = G,
+    max_time: float = 20.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Integrate many flights at once. Returns (distance, apex, flight_time).
+
+    Monte Carlo propagation needs thousands of trajectories, and stepping them
+    one at a time in Python costs more than the rest of the pipeline combined.
+    The dynamics are identical for every sample, so we advance the whole
+    ensemble as one array and freeze each flight as it lands.
+    """
+    mass, diameter = IMPLEMENTS[implement]
+    k = 0.5 * rho * cd * (np.pi * (diameter / 2.0) ** 2) / mass
+
+    v0 = np.asarray(v0, dtype=float)
+    x = np.zeros_like(v0)
+    y = np.asarray(h0, dtype=float).copy()
+    vx = v0 * np.cos(theta)
+    vy = v0 * np.sin(theta)
+
+    n = len(v0)
+    dist = np.full(n, np.nan)
+    tflight = np.full(n, np.nan)
+    apex = y.copy()
+    active = np.ones(n, dtype=bool)
+    t = 0.0
+
+    def deriv(s: np.ndarray) -> np.ndarray:
+        _, _, svx, svy = s
+        speed = np.hypot(svx, svy)
+        return np.stack([svx, svy, -k * speed * svx, -g - k * speed * svy])
+
+    for _ in range(int(max_time / dt)):
+        if not active.any():
+            break
+        s = np.stack([x, y, vx, vy])
+        k1 = deriv(s)
+        k2 = deriv(s + 0.5 * dt * k1)
+        k3 = deriv(s + 0.5 * dt * k2)
+        k4 = deriv(s + dt * k3)
+        s_next = s + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        t += dt
+
+        landed = active & (s_next[1] <= 0.0)
+        if landed.any():
+            # Interpolate the exact crossing so landing is not quantised to dt.
+            frac = y[landed] / (y[landed] - s_next[1][landed])
+            dist[landed] = x[landed] + frac * (s_next[0][landed] - x[landed])
+            tflight[landed] = t - dt + frac * dt
+            active = active & ~landed
+
+        x = np.where(active, s_next[0], x)
+        y = np.where(active, s_next[1], y)
+        vx = np.where(active, s_next[2], vx)
+        vy = np.where(active, s_next[3], vy)
+        apex = np.maximum(apex, y)
+
+    return dist, apex, tflight
+
+
 def drag_penalty(v0: float, theta_rad: float, h0: float, implement: str = "shot_mens") -> float:
     """Fraction of range lost to drag. Sanity check on the 'drag is small' claim."""
     with_drag = integrate(v0, theta_rad, h0, implement).distance

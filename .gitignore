@@ -6,4 +6,3 @@ __pycache__/
 
 # Rendered scenes are large and fully reproducible from demo.py.
 out/scenes/
-out/demo_run.txt

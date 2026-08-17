@@ -158,6 +158,7 @@ def analyse_finish(
     labels: dict[int, str] | None = None,
     min_area: float = 120.0,
     exposure_s: float | None = None,
+    ensemble: bool = False,
 ) -> FinishResult:
     """Full pipeline: detect, group by lane, solve each crossing, rank.
 
@@ -173,7 +174,12 @@ def analyse_finish(
     uncertainty accordingly rather than quietly reporting a biased number.
     """
     height = frames[0].shape[0]
-    per_frame = detect_blobs(frames, threshold=22.0, min_area=min_area)
+    # No ensemble here, deliberately. Ensembling buys coverage on small, fast,
+    # low-contrast objects; a sprinter is none of those. Illumination
+    # normalisation is on by default and does matter, because an outdoor track
+    # in changing light would otherwise poison the background plate.
+    per_frame = detect_blobs(frames, threshold=22.0, min_area=min_area,
+                             ensemble=ensemble)
 
     # Largest blob per lane per frame: legs and arms can fragment a silhouette.
     tracks: dict[int, list[Blob]] = {i: [] for i in range(lanes)}

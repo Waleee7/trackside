@@ -18,7 +18,17 @@ from pathlib import Path
 
 import numpy as np
 
-from trackside import PlaneCalibration, analyse_finish, analyse_flight
+from trackside import (
+    PlaneCalibration,
+    Zone,
+    analyse_finish,
+    analyse_flight,
+    detect_blobs,
+    detect_foul,
+    events_from_finish,
+    events_from_flight,
+    summarise,
+)
 from trackside.render import annotate_strip, trajectory_overlay, validation_plot
 from trackside.synth import Runner, load_frames, render_sprint, render_throw
 
@@ -105,12 +115,16 @@ def demo_finish() -> dict:
           f"reported as ±{blind.placings[0].cross_time.sigma * 1000:.2f} ms")
     print("  the bias is common to every lane, so the finishing order is unaffected.")
 
+    print("\n  events:")
+    for line in summarise(events_from_finish(blind, shutter_known=False)).splitlines():
+        print(f"    {line}")
+
     return {"max_error_ms": max(errors), "order_ok": order_ok}
 
 
 def _one_throw(scene: Path, v0: float, angle: float, h0: float,
-               subframes: int, quiet: bool = True) -> dict:
-    truth = render_throw(scene, v0=v0, angle_deg=angle, h0=h0, subframes=subframes)
+               subframes: int, scale_mode: str = "fuse") -> dict:
+    render_throw(scene, v0=v0, angle_deg=angle, h0=h0, subframes=subframes)
     frames, meta = load_frames(scene)
     p = meta["payload"]
 
@@ -118,13 +132,14 @@ def _one_throw(scene: Path, v0: float, angle: float, h0: float,
         p["ring_width_px"] + CLICK_ERROR_PX, "shot", sigma_pixel=2.0
     )
     res = analyse_flight(
-        frames, cal, meta["fps"], p["ground_y_px"], use_gravity_scale=True
+        frames, cal, meta["fps"], p["ground_y_px"],
+        scale_mode=scale_mode, exposure_s=p["exposure_s"],
     )
     return {
         "frames": frames, "meta": meta, "cal": cal, "res": res,
         "truth_m": p["landing_distance_m"],
-        "pred_m": res.predicted_distance_with_drag.value,
-        "sigma_m": res.predicted_distance_with_drag.sigma,
+        "pred_m": res.predicted_distance.value,
+        "sigma_m": res.predicted_distance.sigma,
         "v0": v0, "angle": angle, "h0": h0,
     }
 
@@ -147,42 +162,83 @@ def demo_flight() -> dict:
           f"(thrower, noise) on ballistic consistency alone\n")
 
     rows = [
-        ("release speed", res.release_speed, v0, "m/s"),
-        ("release angle", res.release_angle, angle, "deg"),
-        ("release height", res.release_height, h0, "m"),
-        ("distance", res.predicted_distance_with_drag, p["landing_distance_m"], "m"),
+        ("release speed", res.release_speed, v0),
+        ("release angle", res.release_angle, angle),
+        ("release height", res.release_height, h0),
+        ("flight time", res.flight_time, p["flight_time_s"]),
+        ("apex", res.apex_height, p["apex_m"]),
+        ("distance", res.predicted_distance, p["landing_distance_m"]),
     ]
     print(f"  {'quantity':<16}{'measured':>22}{'truth':>10}{'error':>12}")
-    for name, m, truth_v, unit in rows:
+    for name, m, truth_v in rows:
         err = 100 * (m.value - truth_v) / truth_v
         print(f"  {name:<16}{m.format(3):>22}{truth_v:>10.3f}{err:>+11.2f}%")
+    print(f"\n  model residual: {res.residual_px:.3f} px over {res.n_inliers} points")
 
-    rule("   the gravity cross-check")
-    print(f"  ring calibration (hand-clicked, {CLICK_ERROR_PX} px off) : "
-          f"{res.ring_scale_mm_px.format(3)}")
-    print(f"  gravity calibration (from flight curvature)  : {res.gravity_scale_mm_px.format(3)}")
-    print(f"  true scale                                   : {true_mpp_mm:.3f} mm/px")
+    rule("   two independent calibrations, fused")
+    print(res.scale.describe())
+    print(f"\n  true scale                   {true_mpp_mm / 1000:.6f} m/px")
     ring_err = 100 * abs(res.ring_scale_mm_px.value - true_mpp_mm) / true_mpp_mm
     grav_err = 100 * abs(res.gravity_scale_mm_px.value - true_mpp_mm) / true_mpp_mm
-    print(f"\n  ruler error {ring_err:.2f}%  vs  gravity error {grav_err:.2f}%   "
+    print(f"  ruler error {ring_err:.2f}%  vs  gravity error {grav_err:.2f}%   "
           f"({ring_err / max(grav_err, 1e-9):.0f}x better)")
 
-    ring_only = analyse_flight(
+    ruler_only = analyse_flight(
         rec["frames"], rec["cal"], rec["meta"]["fps"], p["ground_y_px"],
-        use_gravity_scale=False,
+        scale_mode="ruler", exposure_s=p["exposure_s"],
     )
-    print(f"  recovered g using the ruler: {ring_only.recovered_g.format(3)} "
-          f"(true 9.807) — the {ring_err:.2f}% ruler error shows up here as a "
-          f"{100 * abs(ring_only.recovered_g.value - 9.80665) / 9.80665:.2f}% error in g.")
+    print(f"\n  forcing the ruler's scale implies g = "
+          f"{ruler_only.recovered_g.format(3)} (true 9.807), and the flight "
+          f"model then misfits by {ruler_only.residual_px:.2f} px "
+          f"(vs {res.residual_px:.2f} px fused).")
     print("  that is the audit: a bad ruler cannot hide, because it breaks physics.")
+
+    rule("   events, not a dashboard")
+    print(summarise(events_from_flight(res)))
 
     trajectory_overlay(rec["frames"], res, OUT / "throw_trajectory.png")
     print(f"\n  → {OUT / 'throw_trajectory.png'}")
     return rec
 
 
+def demo_foul() -> None:
+    rule("3. RULE CHECK  —  zone occupancy on the throwing circle")
+    print("  rendering the same throw, but the thrower is carried over the")
+    print("  stop board while the implement is still in the air…")
+
+    results = {}
+    for label, foul in (("legal throw", False), ("foul throw", True)):
+        scene = WORK / ("foul" if foul else "legal")
+        render_throw(scene, v0=12.0, angle_deg=37.0, h0=2.05, subframes=3,
+                     foul_step_over=foul)
+        frames, meta = load_frames(scene)
+        p = meta["payload"]
+        zone = Zone.from_circle_side_on(
+            p["ring_center_x_px"], p["ring_width_px"], p["ground_y_px"]
+        )
+        cal = PlaneCalibration.from_circle(
+            p["ring_width_px"] + CLICK_ERROR_PX, "shot", sigma_pixel=2.0
+        )
+        # The rule window comes from the tracked flight, not from the truth
+        # file: the check has to know when the implement landed using only what
+        # it measured, or it is not a rule check, it is a lookup.
+        flight = analyse_flight(frames, cal, meta["fps"], p["ground_y_px"],
+                                exposure_s=p["exposure_s"])
+        landing_frames = (flight.times * meta["fps"]).astype(int)
+
+        per_frame = detect_blobs(frames, threshold=20.0, min_area=8.0)
+        ev = detect_foul(per_frame, zone, landing_frames, p["ground_y_px"])
+        results[label] = ev
+        print(f"\n  {label:<12} {ev.format()}")
+        shutil.rmtree(scene, ignore_errors=True)
+
+    ok = (results["legal throw"].kind == "foul.none"
+          and results["foul throw"].kind == "foul.left_circle")
+    print(f"\n  rule check: {'CORRECT on both' if ok else 'MISCLASSIFIED'}")
+
+
 def demo_validation(n: int) -> list[dict]:
-    rule(f"3. VALIDATION SWEEP  —  {n} throws, predicted vs measured")
+    rule(f"4. VALIDATION SWEEP  —  {n} throws, predicted vs measured")
     rng = np.random.default_rng(7)
     v0s = np.linspace(10.5, 14.5, n)
     records = []
@@ -224,6 +280,7 @@ def main() -> None:
 
     finish = demo_finish()
     demo_flight()
+    demo_foul()
     if not args.skip_sweep:
         n = args.throws or (3 if args.quick else 6)
         demo_validation(n)

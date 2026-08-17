@@ -1,0 +1,112 @@
+
+[1mtrackside[0m — measuring track & field from one camera, with error bars
+every number below is checked against ground truth the pipeline never sees
+
+[1m1. SPRINT FINISH  —  who won, and can we actually call it?[0m
+──────────────────────────────────────────────────────────────────────────────
+  rendering 6 lanes at 60 fps (exposure 0.6 frames, sub-pixel, sensor noise)…
+  90 frames in 3.8s
+
+  frame interval = 16.67 ms
+
+     athlete          solved     truth      error           speed
+  1. Okafor         1.1802s    1.1800    +0.16 ms 10.15 ± 0.02 m/s
+  2. Delgado        1.1955s    1.1950    +0.49 ms  9.99 ± 0.01 m/s
+  3. Petrov         1.2104s    1.2100    +0.42 ms  9.90 ± 0.00 m/s
+  4. Hastings       1.2128s    1.2122    +0.58 ms 10.10 ± 0.00 m/s
+  5. Nakamura       1.2395s    1.2400    -0.47 ms  9.83 ± 0.02 m/s
+  6. Brandt         1.2705s    1.2700    +0.50 ms  9.70 ± 0.00 m/s
+
+  max timing error : 0.58 ms (29x finer than the frame interval)
+  finishing order  : CORRECT
+
+  margins:
+    Okafor     over Delgado       15.3 ms   (resolution 3.35 ms)  call it
+    Delgado    over Petrov        14.9 ms   (resolution 1.22 ms)  call it
+    Petrov     over Hastings       2.4 ms   (resolution 0.23 ms)  call it
+    Hastings   over Nakamura      26.8 ms   (resolution 3.28 ms)  call it
+    Nakamura   over Brandt        31.0 ms   (resolution 3.28 ms)  call it
+
+  → /Users/walee2/trackside/out/photo_finish.png
+
+  with shutter UNKNOWN: absolute times biased -4.72 ms, reported as ±5.74 ms
+  the bias is common to every lane, so the finishing order is unaffected.
+
+  events:
+    [!] finish.shutter_unknown absolute times carry an unmodelled offset of up to one frame; margins between lanes are unaffected because it is common mode
+    [·] finish.placing         1. Okafor at 1.1752 ± 0.0057 s (10.15 ± 0.02 m/s)
+    [·] finish.placing         2. Delgado at 1.1905 ± 0.0050 s (9.99 ± 0.01 m/s)
+    [·] finish.placing         3. Petrov at 1.2054 ± 0.0048 s (9.90 ± 0.00 m/s)
+    [·] finish.placing         4. Hastings at 1.2078 ± 0.0048 s (10.10 ± 0.00 m/s)
+    [·] finish.placing         5. Nakamura at 1.2345 ± 0.0058 s (9.83 ± 0.02 m/s)
+    [·] finish.placing         6. Brandt at 1.2655 ± 0.0048 s (9.70 ± 0.00 m/s)
+
+[1m2. FIELD EVENT  —  tracking the implement through the air[0m
+──────────────────────────────────────────────────────────────────────────────
+  rendering a shot put: 13.0 m/s at 37.0°, released 2.05 m up
+  (motion blur, sensor noise, and a swaying thrower as a distractor)
+  rendered + analysed in 39.2s
+
+  tracked 219 detections on the arc, rejected 483 (thrower, noise) on ballistic consistency alone
+
+  quantity                      measured     truth       error
+  release speed       13.004 ± 0.000 m/s    13.000      +0.03%
+  release angle       37.013 ± 0.000 deg    37.000      +0.03%
+  release height         2.046 ± 0.000 m     2.050      -0.19%
+  flight time            1.824 ± 0.000 s     1.823      +0.02%
+  apex                   5.162 ± 0.000 m     5.162      -0.01%
+  distance              18.847 ± 0.001 m    18.840      +0.04%
+
+  model residual: 0.057 px over 219 points
+
+[1m   two independent calibrations, fused[0m
+──────────────────────────────────────────────────────────────────────────────
+  ruler (reference object)     0.0114 ± 0.0001 m/px
+  gravity (flight curvature)   0.0115 ± 0.0000 m/px
+  fused                        0.0115 ± 0.0000 m/px
+  chi2/dof = 0.72   Birge ratio = 0.85   consistent
+
+  true scale                   0.011458 m/px
+  ruler error 0.90%  vs  gravity error 0.01%   (72x better)
+
+  forcing the ruler's scale implies g = 9.717 ± 0.106 m/s^2 (true 9.807), and the flight model then misfits by 0.70 px (vs 0.06 px fused).
+  that is the audit: a bad ruler cannot hide, because it breaks physics.
+
+[1m   events, not a dashboard[0m
+──────────────────────────────────────────────────────────────────────────────
+[·] flight.measured        18.85 ± 0.00 m from 13.00 ± 0.00 m/s at 37.0 ± 0.0 deg
+[·] flight.angle_off_optimal released at 37.0deg, 4.9deg below the 42.0deg optimum for this speed and height
+
+  → /Users/walee2/trackside/out/throw_trajectory.png
+
+[1m3. RULE CHECK  —  zone occupancy on the throwing circle[0m
+──────────────────────────────────────────────────────────────────────────────
+  rendering the same throw, but the thrower is carried over the
+  stop board while the implement is still in the air…
+
+  legal throw  [·] foul.none              thrower stayed in the circle until landing
+
+  foul throw   [✗] foul.left_circle       contact point crossed the stop board at frame 34, 4.0 px beyond the circle, before landing
+
+  rule check: CORRECT on both
+
+[1m4. VALIDATION SWEEP  —  6 throws, predicted vs measured[0m
+──────────────────────────────────────────────────────────────────────────────
+  throw 1/6: 10.5 m/s @ 38.0° h=2.21  pred 13.197 m  truth 13.189 m  resid   +0.8 cm
+  throw 2/6: 11.3 m/s @ 39.2° h=1.94  pred 14.749 m  truth 14.741 m  resid   +0.9 cm
+  throw 3/6: 12.1 m/s @ 35.4° h=2.20  pred 16.638 m  truth 16.632 m  resid   +0.6 cm
+  throw 4/6: 12.9 m/s @ 33.0° h=2.18  pred 18.263 m  truth 18.251 m  resid   +1.1 cm
+  throw 5/6: 13.7 m/s @ 39.4° h=2.04  pred 20.867 m  truth 20.859 m  resid   +0.8 cm
+  throw 6/6: 14.5 m/s @ 35.4° h=1.96  pred 22.570 m  truth 22.561 m  resid   +0.9 cm
+
+  6 throws in 222s
+  RMSE 0.9 cm   bias +0.8 cm   worst 1.1 cm
+  → /Users/walee2/trackside/out/validation.png
+
+[1mSUMMARY[0m
+──────────────────────────────────────────────────────────────────────────────
+  sprint : order correct, worst timing error 0.58 ms on a 16.67 ms frame interval
+  throws : see /Users/walee2/trackside/out/validation.png
+
+  outputs in /Users/walee2/trackside/out
+

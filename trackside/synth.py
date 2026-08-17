@@ -192,6 +192,12 @@ def render_throw(
     subframes: int = 5,
     noise_sigma: float = 2.5,
     distractor: bool = True,
+    lighting_drift: float = 0.0,
+    occluders: int = 0,
+    implement_contrast: float = 1.0,
+    rolling_shutter_s: float = 0.0,
+    barrel_k1: float = 0.0,
+    foul_step_over: bool = False,
     seed: int = 0,
 ) -> SceneTruth:
     """Render a shot put flight. Truth = release parameters and landing distance.
@@ -199,6 +205,22 @@ def render_throw(
     `distractor` adds a swaying athlete silhouette at the circle. It is there to
     break naive "biggest moving blob" tracking -- the pipeline has to reject it
     on ballistic consistency, not on size.
+
+    The remaining knobs exist because a demo that only ever runs on clean
+    synthetic frames tells you nothing about real footage. The usual failure in
+    transferring from simulation is perception mismatch rather than dynamics, so
+    these reproduce the specific ways a phone camera differs from an idealised
+    one:
+
+        lighting_drift      slow exposure/cloud variation, which poisons a
+                            median background plate while leaving frame
+                            differencing untouched
+        occluders           static clutter the implement passes behind
+        implement_contrast  <1 pulls the implement toward the sky colour, as a
+                            distant grey shot on an overcast day really looks
+        rolling_shutter_s   sensor readout time; rows are exposed at different
+                            instants, which skews fast-moving objects
+        barrel_k1           radial lens distortion, which bends a true parabola
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     w, h = size
@@ -214,6 +236,33 @@ def render_throw(
     n_frames = int(np.ceil(traj.flight_time * fps)) + 3
     rad_px = (diameter / 2.0) / mpp
 
+    # Static clutter the implement must pass *behind*. The bars go into the
+    # background plate so they are correctly treated as scenery, and are also
+    # redrawn over the implement each subframe -- otherwise the implement would
+    # render on top of them and never actually be occluded, which would make
+    # this condition a test of nothing.
+    occluder_rects: list[tuple[int, int]] = []
+    if occluders:
+        for i in range(occluders):
+            ox = int(w * (0.30 + 0.55 * i / max(occluders - 1, 1)))
+            occluder_rects.append((ox - 14, ox + 14))
+            cv2.rectangle(bg, (ox - 14, 0), (ox + 14, int(ground_y_px)),
+                          (78, 96, 84), -1)
+
+    # Precompute the lens distortion maps once; remap is cheap per frame.
+    dist_maps = None
+    if barrel_k1:
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        cx_, cy_ = w / 2.0, h / 2.0
+        nx, ny = (xx - cx_) / cx_, (yy - cy_) / cy_
+        r2 = nx * nx + ny * ny
+        f = 1.0 + barrel_k1 * r2
+        dist_maps = (cx_ + nx * f * cx_, cy_ + ny * f * cy_)
+
+    implement_color = tuple(
+        int(38 + (150 - 38) * (1.0 - implement_contrast)) for _ in range(3)
+    )
+
     for k in range(n_frames):
         acc = np.zeros((h, w, 3), np.float64)
         for s in range(subframes):
@@ -223,6 +272,12 @@ def render_throw(
             if distractor:
                 # Thrower finishing the reverse: real motion near the circle.
                 sway = 26.0 * np.sin(2 * np.pi * t * 0.85)
+                if foul_step_over:
+                    # Carried forward over the stop board while the implement is
+                    # still in the air, which is exactly what makes it a foul.
+                    sway += ring_w_px * 0.70 * min(
+                        t / max(traj.flight_time * 0.45, 1e-6), 1.0
+                    )
                 cx = ring_cx + sway
                 cv2.ellipse(frame, _pt(cx, ground_y_px - 78), (_r(20), _r(52)),
                             0, 0, 360, (54, 62, 74), -1, cv2.LINE_AA, SHIFT)
@@ -231,16 +286,43 @@ def render_throw(
 
             if t <= traj.flight_time:
                 x_m, y_m = traj.at(t)
-                px = release_x_m / mpp + float(x_m) / mpp
                 py = ground_y_px - float(y_m) / mpp
-                cv2.circle(frame, _pt(px, py), _r(rad_px), (38, 40, 46), -1, cv2.LINE_AA, SHIFT)
+                if rolling_shutter_s:
+                    # Each row is exposed at its own instant. The implement is
+                    # small, so evaluating the readout delay at its own row is
+                    # an excellent approximation to a per-row render.
+                    t_row = t + (py / h) * rolling_shutter_s
+                    x_m, y_m = traj.at(min(t_row, traj.flight_time))
+                    py = ground_y_px - float(y_m) / mpp
+                px = release_x_m / mpp + float(x_m) / mpp
+                cv2.circle(frame, _pt(px, py), _r(rad_px), implement_color, -1,
+                           cv2.LINE_AA, SHIFT)
                 # Specular highlight; a real steel shot is not a flat disc.
                 cv2.circle(frame, _pt(px - rad_px * 0.3, py - rad_px * 0.3),
-                           _r(max(rad_px * 0.28, 1.0)), (96, 98, 104), -1, cv2.LINE_AA, SHIFT)
+                           _r(max(rad_px * 0.28, 1.0)),
+                           tuple(min(c + 58, 255) for c in implement_color),
+                           -1, cv2.LINE_AA, SHIFT)
+
+            # Foreground clutter goes on last, so it genuinely hides whatever
+            # passes behind it.
+            for ox0, ox1 in occluder_rects:
+                cv2.rectangle(frame, (ox0, 0), (ox1, int(ground_y_px)),
+                              (78, 96, 84), -1)
 
             acc += frame
         img = acc / subframes
-        img += rng.normal(0, noise_sigma, img.shape)
+
+        if lighting_drift:
+            # Slow illumination change: a median background plate built over
+            # the whole clip is wrong in every frame once this is present.
+            gain = 1.0 + lighting_drift * np.sin(2 * np.pi * (k / n_frames) * 1.3)
+            img *= gain
+
+        if dist_maps is not None:
+            img = cv2.remap(img.astype(np.float32), dist_maps[0], dist_maps[1],
+                            cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+        img = img + rng.normal(0, noise_sigma, img.shape)
         cv2.imwrite(str(out_dir / f"{k:05d}.png"), np.clip(img, 0, 255).astype(np.uint8))
 
     truth = SceneTruth(
@@ -261,6 +343,16 @@ def render_throw(
             "landing_distance_m": traj.distance,
             "apex_m": traj.apex,
             "drag_penalty_frac": physics.drag_penalty(v0, theta, h0, implement),
+            "exposure_s": exposure / fps,
+            "conditions": {
+                "lighting_drift": lighting_drift,
+                "occluders": occluders,
+                "implement_contrast": implement_contrast,
+                "rolling_shutter_s": rolling_shutter_s,
+                "barrel_k1": barrel_k1,
+                "noise_sigma": noise_sigma,
+                "foul_step_over": foul_step_over,
+            },
         },
     )
     truth.save(out_dir / "truth.json")

@@ -61,16 +61,22 @@ def annotate_strip(
                      (int(to_x(truth[r.lane])), y1), (90, 255, 90), 1, cv2.LINE_AA)
 
         label = f"{r.name}  {r.cross_time.value:.4f}s"
-        (tw, _), _ = cv2.getTextSize(label, _FONT, 0.52, 1)
+        (tw, th), _ = cv2.getTextSize(label, _FONT, 0.52, 1)
         # Flip the label to the left of the line when it would run off the edge.
         lx = int(x) + 10 if x + tw + 16 < img.shape[1] else int(x) - tw - 10
         ly = y0 + int(band * 0.58)
-        cv2.putText(img, label, (lx, ly), _FONT, 0.52, (0, 0, 0), 3, cv2.LINE_AA)
+        box = img.copy()
+        cv2.rectangle(box, (lx - 6, ly - th - 6), (lx + tw + 6, ly + 8),
+                      (18, 18, 20), -1)
+        cv2.addWeighted(box, 0.55, img, 0.45, 0, img)
         cv2.putText(img, label, (lx, ly), _FONT, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
 
-    header = "PHOTO FINISH   horizontal axis = TIME   white = solved, green = truth, band = 2 sigma"
-    cv2.putText(img, header, (10, 20), _FONT, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(img, header, (10, 20), _FONT, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+    _text_panel(
+        img,
+        ["PHOTO FINISH   horizontal axis = TIME",
+         "white = solved   green = truth   band = 2 sigma"],
+        origin=(12, 16), scale=0.5, line_h=24,
+    )
     cv2.imwrite(str(out_path), img)
     return img
 
@@ -111,12 +117,37 @@ def trajectory_overlay(
         f"recovered g {result.recovered_g.format(4)}",
         f"{result.n_inliers} of {result.n_candidates} detections on the arc",
     ]
-    for i, line in enumerate(lines):
-        cv2.putText(comp, line, (20, 40 + i * 30), _FONT, 0.72, (20, 20, 20), 4, cv2.LINE_AA)
-        cv2.putText(comp, line, (20, 40 + i * 30), _FONT, 0.72, (255, 255, 255), 1, cv2.LINE_AA)
-
+    _text_panel(comp, lines, origin=(20, 22), scale=0.72)
     cv2.imwrite(str(out_path), comp)
     return comp
+
+
+def _text_panel(
+    img: np.ndarray,
+    lines: list[str],
+    origin: tuple[int, int] = (20, 22),
+    scale: float = 0.7,
+    pad: int = 12,
+    line_h: int = 30,
+) -> None:
+    """Draw text over a translucent dark panel.
+
+    Not an outline. OpenCV widens glyphs as stroke thickness grows, so a thick
+    dark pass under a thin light pass renders a *longer* string underneath and
+    its tail shows past the end of every line.
+    """
+    x, y = origin
+    widths = [cv2.getTextSize(s, _FONT, scale, 1)[0][0] for s in lines]
+    w = max(widths) + 2 * pad
+    h = line_h * len(lines) + pad
+
+    panel = img.copy()
+    cv2.rectangle(panel, (x - pad, y - pad), (x + w, y + h), (18, 18, 20), -1)
+    cv2.addWeighted(panel, 0.55, img, 0.45, 0, img)
+
+    for i, line in enumerate(lines):
+        cv2.putText(img, line, (x, y + line_h * (i + 1) - 8), _FONT, scale,
+                    (255, 255, 255), 1, cv2.LINE_AA)
 
 
 def validation_plot(records: list[dict], out_path: Path) -> None:

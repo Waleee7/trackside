@@ -2,6 +2,10 @@
 
 **Measure track & field events from a single camera — and report how wrong the measurement might be.**
 
+![A synthetic shot put tracked end to end: the fitted arc over 219 detections, with release speed, angle, height and predicted distance printed with their uncertainties](out/throw_trajectory.png)
+
+<sub>A synthetic shot put from `python demo.py`: predicted distance 18.847 m against a true 18.840 m.</sub>
+
 Two pipelines, one idea:
 
 - **`finish`** — sprint finish timing from ordinary video, resolved far below the frame interval, and honest about margins too close to call.
@@ -51,10 +55,9 @@ The horizontal axis is *time*, not space. White is the solved crossing instant, 
 
 Model residual: **0.057 px** over 219 tracked points. Across 6 throws from 13.2 m to 22.6 m: **RMSE 0.9 cm, worst case 1.1 cm.**
 
-![trajectory](out/throw_trajectory.png)
 ![validation](out/validation.png)
 
-219 of 702 detections were kept. The swaying thrower is rejected on *ballistic consistency* alone — not size, not speed. Only the real projectile has constant horizontal velocity and constant downward acceleration at the same time.
+219 of 702 detections were kept (the arc at the top of this page). The swaying thrower is rejected on *ballistic consistency* alone — not size, not speed. Only the real projectile has constant horizontal velocity and constant downward acceleration at the same time.
 
 The residuals are now a near-constant **+0.8 cm offset** rather than the structured scatter of earlier versions, which points at one remaining systematic rather than a modelling error. The error bars are still tighter than that offset, so treat them as a lower bound.
 
@@ -158,10 +161,28 @@ The reason is instructive. That argument is made about ensembling **learned** de
 
 It is off by default, kept switchable, and the negative result is kept in the repo rather than deleted.
 
+## Architecture
+
+```mermaid
+flowchart LR
+  V[Video frames] --> DET["detect.py<br/>background subtraction,<br/>blob detection"]
+  DET --> FL["flight.py<br/>track the implement,<br/>fit its flight"]
+  DET --> FIN["finish.py<br/>sub-frame finish-line crossings"]
+  CAL["calib.py<br/>scale from the regulation circle"] --> FL
+  FIT["fit.py + physics.py<br/>dragged-trajectory model"] --> FL
+  FUSE["fuse.py<br/>ruler vs gravity, Birge ratio"] --> FL
+  FL --> OUT["events.py + render.py<br/>typed events and plots"]
+  FIN --> OUT
+  SYN["synth.py<br/>synthetic scenes with exact truth"] -. validates .-> FL
+  SYN -. validates .-> FIN
+```
+
+Every result is a `measure.py` `Measurement`: a value with its uncertainty. The finish pipeline takes its scale as `meters_per_pixel`; the flight pipeline gets it from the circle and checks it against gravity. `cli.py` wires both to the `trackside` command.
+
 ## Install
 
 ```bash
-git clone https://github.com/<you>/trackside && cd trackside
+git clone https://github.com/Waleee7/trackside && cd trackside
 uv venv --python python3.11 && uv pip install -e .
 python demo.py
 ```
@@ -221,11 +242,27 @@ trackside finish race.mp4 --fps 60 --finish-x 980 --lanes 6 \
 ## Tests
 
 ```bash
-python -m pytest tests/ -q     # 34 passed
+python -m pytest tests/ -q
 ```
+
+Last run on 2026-11-17: **34 of 34 passed** in 62 s on Python 3.11.
 
 The end-to-end tests assert against exact ground truth. Several assert that things **fail** when they should: a 10% calibration error must break the gravity audit and push the Birge ratio past 1.5, and two discrepant estimates must fuse to something *less* certain than either input. A check that never fails is decoration.
 
+## Status
+
+Research-grade Python library and CLI, validated on synthetic scenes only. It has not been run on real footage yet: field validation needs real throws filmed next to a tape measure. Shot put is the supported event.
+
+## Roadmap
+
+- Field validation against tape-measured throws and timed races.
+- A one-off camera calibration to correct lens distortion, the largest error in the sweep.
+- An aerodynamic model so discus and javelin can be measured (see SECTOR for that model in the browser).
+
+## Credits
+
+Built by [Akinwale Dare](https://github.com/Waleee7), a discus and hammer thrower at Life University. Uses NumPy, OpenCV, SciPy and Matplotlib.
+
 ## Licence
 
-MIT
+MIT, see [LICENSE](LICENSE).
